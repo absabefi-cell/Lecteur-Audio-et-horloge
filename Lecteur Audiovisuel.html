@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+
+
+
+
+
+  <style>
+body { color: #ffd700; }
+<body style="background-color:#add8e6;">
+  
+    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    body { margin: 16px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    .card { border: 1px solid #ccc; border-radius: 12px; padding: 12px; margin-top: 12px; }
+    label { font-size: 14px; }
+    input[type="range"] { width: 220px; }
+    button { padding: 8px 12px; border-radius: 8px; border: 1px solid #aaa; background: #f7f7f7; }
+    button:active { transform: scale(0.98); }
+    canvas { width: 100%; height: 220px; background: #000; border-radius: 12px; display: block; }
+    .timebox { width: 3.5rem; text-align: center; padding: 6px; border-radius: 8px; border: 1px solid #aaa; }
+    .pill { padding: 4px 8px; background: #eef; border-radius: 999px; font-size: 12px; }
+    .hint { color: #666; font-size: 12px; }
+    .title { font-weight: 600; font-size: 14px; margin: 6px 0 8px; }
+    
+  </style>
+  
+<style>
+#clock {
+  position: fixed;
+  top: 2px;
+  right: 2px;
+  font-size: 16px;
+  font-weight: bold;
+  font-family: 'Courier New', monospace;
+  color: #00ff00; /* vert électronique — tu peux changer en #ff0000 pour rouge */
+  text-shadow: 0 0 8px #00ff00; /* effet lumineux */
+  background: rgba(0, 0, 0, 0.7);
+  padding: 8px 14px;
+  border-radius: 10px;
+  letter-spacing: 2px;
+}
+</style>
+
+<div id="clock"></div>
+
+<script>
+function updateClock() {
+  const now = new Date();
+  const h = String(now.getHours()).padStart(2, '0');
+  const m = String(now.getMinutes()).padStart(2, '0');
+  const s = String(now.getSeconds()).padStart(2, '0');
+  document.getElementById('clock').textContent = `${h}:${m}:${s}`;
+}
+setInterval(updateClock, 1000);
+updateClock();
+</script>
+      
+<body style="background-color:#00008b;"</body>
+</head>
+<body>
+  <h3>Audio: Oscilloscope
+  et <br>
+  Minuterie</h3>
+
+  <div class="card">
+    <div class="row">
+      <input id="file" type="file" accept="audio/*" />
+      <span class="hint">Choisis un fichier audio (MP3/…)</span>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="playBtn" disabled>▶︎ Play</button>
+      <button id="pauseBtn" disabled>⏸︎ Pause</button>
+      <label for="vol">Volume</label>
+      <input id="vol" type="range" min="0" max="1" step="0.001" value="0.9" />
+      <span id="volVal" class="pill">0.90</span>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label>Minuterie Min/S</label>
+      <input id="mm" class="timebox" type="number" min="0" max="999" value="0" /> :
+      <input id="ss" class="timebox" type="number" min="0" max="59" value="00" />
+      <button id="armTimer">Demarer</button>
+      <button id="cancelTimer">Annuler</button>
+      <span id="countdown" class="pill">00:00</span>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <audio id="player" controls style="width:100%"></audio>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="title">Spectre de fréquences</div>
+    <canvas id="canvasSpectrum" width="1024" height="300"></canvas>
+  </div>
+
+  <div class="card">
+    <div class="title">Signal temporel (oscilloscope)</div>
+    <canvas id="canvasWave" width="1024" height="300"></canvas>
+    <div class="hint" style="margin-top:6px">
+      Si rien ne bouge, touche l’écran. Les navigateurs mobiles exigent une interaction utilisateur.
+    </div>
+  </div>
+
+<script>
+(() => {
+  const fileInput = document.getElementById('file');
+  const audioEl   = document.getElementById('player');
+  const playBtn   = document.getElementById('playBtn');
+  const pauseBtn  = document.getElementById('pauseBtn');
+  const vol       = document.getElementById('vol');
+  const volVal    = document.getElementById('volVal');
+  const mm        = document.getElementById('mm');
+  const ss        = document.getElementById('ss');
+  const armBtn    = document.getElementById('armTimer');
+  const cancelBtn = document.getElementById('cancelTimer');
+  const countdown = document.getElementById('countdown');
+
+  const canvasSpectrum = document.getElementById('canvasSpectrum');
+  const ctxSpec        = canvasSpectrum.getContext('2d');
+  const canvasWave     = document.getElementById('canvasWave');
+  const ctxWave        = canvasWave.getContext('2d');
+
+  let ac;            // AudioContext
+  let sourceNode;    // MediaElementSource
+  let analyser;      // AnalyserNode (freq + time)
+  let gainNode;      // GainNode
+  let rafId;         // animation frame id
+  let timerId;       // setInterval for countdown
+  let stopAt = 0;    // epoch ms when to stop
+
+  async function ensureAudioGraph() {
+    if (!ac) {
+      ac = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+      gainNode = ac.createGain();
+      analyser = ac.createAnalyser();
+      analyser.fftSize = 2048;                // works for both frequency & time domain
+      analyser.smoothingTimeConstant = 0.85;  // smooth spectrum
+      connectGraph();
+    }
+    if (ac.state === 'suspended') {
+      await ac.resume();
+    }
+  }
+
+  function connectGraph() {
+    if (sourceNode) { try { sourceNode.disconnect(); } catch(e){} }
+    if (!audioEl) return;
+    sourceNode = ac.createMediaElementSource(audioEl);
+    sourceNode.connect(gainNode);
+    gainNode.connect(analyser);
+    analyser.connect(ac.destination);
+  }
+
+  function pickFile(file) {
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    audioEl.src = url;
+    audioEl.load();
+    playBtn.disabled = false;
+    pauseBtn.disabled = false;
+  }
+
+  // Drawing routines
+  function clearCanvas(ctx, w, h) {
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, w, h);
+  }
+
+  function drawSpectrum() {
+    const w = canvasSpectrum.width;
+    const h = canvasSpectrum.height;
+    clearCanvas(ctxSpec, w, h);
+
+    const bufferLength = analyser.frequencyBinCount; // fftSize / 2
+    const dataArray = new Uint8Array(bufferLength);
+    analyser.getByteFrequencyData(dataArray);
+
+    const barCount = Math.min(160, bufferLength);
+    const step = Math.floor(bufferLength / barCount);
+    const barWidth = w / barCount;
+
+    ctxSpec.fillStyle = 'white';
+    for (let i = 0; i < barCount; i++) {
+      const v = dataArray[i * step] / 255; // 0..1
+      const barHeight = v * (h - 10);
+      const x = i * barWidth;
+      const y = h - barHeight;
+      ctxSpec.fillRect(x, y, Math.max(1, barWidth - 1), barHeight);
+    }
+  }
+
+  function drawWave() {
+    const w = canvasWave.width;
+    const h = canvasWave.height;
+    clearCanvas(ctxWave, w, h);
+
+    const bufferLength = analyser.fftSize;
+    const dataArray = new Uint8Array(bufferLength);
+    analyser.getByteTimeDomainData(dataArray);
+
+    // Baseline in the middle
+    ctxWave.strokeStyle = 'white';
+    ctxWave.lineWidth = 1;
+    ctxWave.beginPath();
+    ctxWave.moveTo(0, h/2);
+    ctxWave.lineTo(w, h/2);
+    ctxWave.stroke();
+
+    // Signal
+    ctxWave.beginPath();
+    const slice = w / bufferLength;
+    for (let i = 0; i < bufferLength; i++) {
+      const v = (dataArray[i] - 128) / 128; // -1..1 approx
+      const y = h/2 - v * (h * 0.45);
+      const x = i * slice;
+      if (i === 0) ctxWave.moveTo(x, y);
+      else ctxWave.lineTo(x, y);
+    }
+    ctxWave.stroke();
+  }
+
+  function drawLoop() {
+    if (!analyser) return;
+    drawSpectrum();
+    drawWave();
+    rafId = requestAnimationFrame(drawLoop);
+  }
+
+  function startDraw() {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = requestAnimationFrame(drawLoop);
+  }
+
+  function stopDraw() {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = null;
+    clearCanvas(ctxSpec, canvasSpectrum.width, canvasSpectrum.height);
+    clearCanvas(ctxWave, canvasWave.width, canvasWave.height);
+  }
+
+  // Volume
+  vol.addEventListener('input', () => {
+    const v = parseFloat(vol.value);
+    volVal.textContent = v.toFixed(2);
+    if (gainNode) gainNode.gain.value = v;
+  });
+
+  // File picker
+  fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    pickFile(file);
+    await ensureAudioGraph();
+    gainNode.gain.value = parseFloat(vol.value);
+  });
+
+  // Play/Pause buttons
+  playBtn.addEventListener('click', async () => {
+    await ensureAudioGraph();
+    if (audioEl.src) {
+      await audioEl.play();
+      startDraw();
+    }
+  });
+
+  pauseBtn.addEventListener('click', () => {
+    audioEl.pause();
+    stopDraw();
+  });
+
+  // Auto stop timer
+  function formatMMSS(totalSec) {
+    const m = Math.floor(totalSec / 60);
+    const s = Math.max(0, totalSec % 60);
+    return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+  }
+
+  function clearTimer() {
+    stopAt = 0;
+    if (timerId) clearInterval(timerId);
+    timerId = null;
+    countdown.textContent = '00:00';
+  }
+
+  armBtn.addEventListener('click', () => {
+    const m = Math.max(0, parseInt(mm.value || '0', 10));
+    const s = Math.max(0, Math.min(59, parseInt(ss.value || '0', 10)));
+    const total = m * 60 + s;
+    if (total <= 0) {
+      clearTimer();
+      return;
+    }
+    stopAt = Date.now() + total * 1000;
+    if (timerId) clearInterval(timerId);
+    timerId = setInterval(() => {
+      const remainMs = stopAt - Date.now();
+      const remain = Math.max(0, Math.round(remainMs / 1000));
+      countdown.textContent = formatMMSS(remain);
+      if (remain <= 0) {
+        audioEl.pause();
+        audioEl.currentTime = 0;
+        clearTimer();
+        stopDraw();
+      }
+    }, 250);
+  });
+
+  cancelBtn.addEventListener('click', clearTimer);
+
+  // Resize handling for crisp canvases on mobile
+  function resizeCanvas(el, ctx) {
+    const rect = el.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    // fixed height visual of ~220px; scale buffer to DPR
+    el.width = Math.round(rect.width * dpr);
+    el.height = Math.round(220 * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  function handleResize() {
+    resizeCanvas(canvasSpectrum, ctxSpec);
+    resizeCanvas(canvasWave, ctxWave);
+  }
+  window.addEventListener('resize', handleResize, { passive: true });
+  handleResize();
+
+  // Stop drawing when audio ends
+  audioEl.addEventListener('ended', () => {
+    stopDraw();
+    clearTimer();
+  });
+
+  // Sync with native controls
+  audioEl.addEventListener('pause', () => stopDraw());
+  audioEl.addEventListener('play', async () => {
+    await ensureAudioGraph();
+    startDraw();
+  });
+
+  // Touch to resume context on mobile
+  document.body.addEventListener('touchend', async () => {
+    if (ac && ac.state === 'suspended') await ac.resume();
+  }, { passive: true });
+})();
+</script>
+</body>
+</html>
